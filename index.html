@@ -101,7 +101,7 @@ h1{margin:0; font:400 clamp(30px,6vw,52px)/1 var(--display); letter-spacing:.01e
   <h1>Инь&nbsp;и&nbsp;Ян</h1>
   <dl class="spec">
     <div><dt>Ø</dt><dd>33 мм</dd></div>
-    <div><dt>вес</dt><dd>27 г</dd></div>
+    <div><dt>вес</dt><dd>100 г</dd></div>
     <div><dt>металл</dt><dd id="metalName">Ag 925</dd></div>
   </dl>
 </header>
@@ -168,9 +168,10 @@ const KeyPhysics = (() => {
       hand: body({mass:1,inertia:[1,1,1],x:cfg.hand,q:[0,0,0,1],dynamic:false}),
       bodies: cfg.bodies.map(body),
       joints: cfg.joints,          // {a,b (index, -1=hand), ra, rb (local), axA, axB (local) | null, slop}
-      substeps: cfg.substeps||40,
+      substeps: cfg.substeps||50,
+      iterations: cfg.iterations||2,
       jointFriction: cfg.jointFriction??2.5,   // 1/s, metal-on-metal rubbing in the links
-      airDrag: cfg.airDrag??0.35,
+      airCoeff: cfg.airCoeff??6.3,   // air drag force per unit speed; acceleration = airCoeff/mass, so heavy parts swing longer
       angDrag: cfg.angDrag??0.06,
       mu_s: 0.38, mu_d: 0.28, restitution: 0.32,
       spheres: cfg.spheres||[],     // [i,j] pairs colliding as spheres (radius per body)
@@ -186,8 +187,8 @@ const KeyPhysics = (() => {
           b.v=add(b.v,scl(env.g,h)); b.xp=b.x; b.x=add(b.x,scl(b.v,h));
           b.qp=b.q; rotBy(b,scl(b.w,h));
         }
-        // joints
-        for (const j of W.joints){
+        // joints (two Gauss-Seidel passes: light links sit between a 92 g pendant and the hand)
+        for (let it=0; it<W.iterations; it++) for (const j of W.joints){
           const a=B(j.a), b=B(j.b);
           const ra=qrot(a.q,j.ra), rb=qrot(b.q,j.rb);
           const d=sub(add(b.x,rb),add(a.x,ra)), c=len(d);
@@ -264,13 +265,13 @@ const KeyPhysics = (() => {
           if (a.dyn) a.w=add(a.w,invIw(a,scl(nn,L)));
           if (b.dyn) b.w=sub(b.w,invIw(b,scl(nn,L)));
         }
-        for (const b of W.bodies){ b.v=scl(b.v,1-W.airDrag*h); b.w=scl(b.w,1-W.angDrag*h); }
+        for (const b of W.bodies){ b.v=scl(b.v,1-Math.min(1,W.airCoeff*b.invM*h)); b.w=scl(b.w,1-W.angDrag*h); }
       }
     };
     return W;
   }
 
-  /* ---- keychain layout (1 unit = 15 mm), shared by renderer and solver ---- */
+  /* ---- keychain layout (1 unit = 15 mm, mass in grams: total ≈ 100 g), shared by renderer and solver ---- */
   function layout(){
     const RR=0.66, RW=0.03, PITCH=2*RW+0.004, TH0=Math.PI*0.22, ZS=0.8;
     const LA=0.17, LB=0.092, LR=0.026, RJ=0.12, rj=0.026;
@@ -294,11 +295,11 @@ const KeyPhysics = (() => {
     for(const s of[-1,1]) pendPts.push([0,0,s*T],[0,BAIL_Y+BAIL_R,s*BAIL_r]);
 
     const bodies=[
-      {name:'ring',    com:[0,-RR,0],     mass:3,    inertia:inertia(helixPts,3,RW*RW), pts:ringPts, radius:RR+RW},
+      {name:'ring',    com:[0,-RR,0],     mass:5,    inertia:inertia(helixPts,5,RW*RW), pts:ringPts, radius:RR+RW},
       {name:'link1',   com:[0,y1,zMid],   mass:1.2,  inertia:inertia(stad('yz'),1.2,LR*LR), pts:linkPts('yz'), radius:LA},
       {name:'link2',   com:[0,y2,zMid],   mass:1.2,  inertia:inertia(stad('xy'),1.2,LR*LR), pts:linkPts('xy'), radius:LA},
       {name:'jump',    com:[0,yj,zMid],   mass:1,    inertia:inertia(torusYZ,1,rj*rj), pts:jumpPts, radius:RJ},
-      {name:'pendant', com:[0,py,zMid],   mass:18,   inertia:inertia(disc,18,T*T/3), pts:pendPts, radius:RO},
+      {name:'pendant', com:[0,py,zMid],   mass:92,   inertia:inertia(disc,92,T*T/3), pts:pendPts, radius:RO},
     ];
     const anchors=[[0,0,zTop],[0,ys+RW,zMid],[0,y1-LA+LR,zMid],[0,y2-LA+LR,zMid],[0,yj-RJ+rj,zMid]];
     const X=[1,0,0], Z=[0,0,1], slop=0.2;
@@ -654,11 +655,13 @@ sensorsBtn.addEventListener('click', ()=> sensorOn ? disableSensors() : enableSe
 /* ---------- other controls ---------- */
 const rnd = mulberry32(Date.now()|0);
 function shake(strength=1){
-  for (const b of W.bodies){
-    const k = strength*(b===W.bodies[4] ? 26 : 18);
-    b.v = [b.v[0]+(rnd()-0.5)*2*k, b.v[1]+(rnd()*0.6)*k, b.v[2]+(rnd()-0.5)*1.2*k];
-    b.w = [b.w[0]+(rnd()-0.5)*12*strength, b.w[1]+(rnd()-0.5)*12*strength, b.w[2]+(rnd()-0.5)*12*strength];
-  }
+  // an impulse, not a velocity: the 92 g pendant answers far less than the 1 g links
+  W.bodies.forEach((b,i)=>{
+    const J = strength*(i===4 ? 1300 : 24), k = J*b.invM;
+    b.v = [b.v[0]+(rnd()-0.5)*2*k, b.v[1]+rnd()*0.6*k, b.v[2]+(rnd()-0.5)*1.2*k];
+    const s = strength*(i===4 ? 2 : 8);
+    b.w = [b.w[0]+(rnd()-0.5)*s, b.w[1]+(rnd()-0.5)*s, b.w[2]+(rnd()-0.5)*s];
+  });
 }
 document.getElementById('shake').addEventListener('click', ()=>shake(1));
 const metalName = document.getElementById('metalName');
