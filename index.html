@@ -94,19 +94,19 @@ h1{margin:0; font:400 clamp(30px,6vw,52px)/1 var(--display); letter-spacing:.01e
 <body>
 
 
-<div id="stage" aria-label="Трёхмерная модель брелка инь-ян. Возьмите брелок и потяните, чтобы раскачать."></div>
+<div id="stage" aria-label="Трёхмерная модель брелка инь-ян на красной нитке, привязанной к шурупу. Возьмите брелок и потяните, чтобы раскачать."></div>
 
 <header class="plate">
   <p class="eyebrow">Брелок · горячая эмаль</p>
   <h1>Инь&nbsp;и&nbsp;Ян</h1>
   <dl class="spec">
-    <div><dt>Ø</dt><dd>33 мм</dd></div>
+    <div><dt>Ø</dt><dd>48 мм</dd></div>
     <div><dt>вес</dt><dd>100 г</dd></div>
     <div><dt>металл</dt><dd id="metalName">Ag 925</dd></div>
   </dl>
 </header>
 
-<p class="hint">Возьмите брелок и потяните<br>Тяните по фону, чтобы повернуть вид<br>«Датчики» — качайте сам телефон</p>
+<p class="hint">Брелок висит на нитке, привязанной к шурупу<br>Возьмите его и потяните<br>Тяните по фону, чтобы повернуть вид<br>«Датчики» — качайте сам телефон</p>
 
 <div class="dock">
   <div class="group" role="radiogroup" aria-label="Металл">
@@ -174,7 +174,8 @@ const KeyPhysics = (() => {
       airCoeff: cfg.airCoeff??6.3,   // air drag force per unit speed; acceleration = airCoeff/mass, so heavy parts swing longer
       angDrag: cfg.angDrag??0.06,
       mu_s: 0.38, mu_d: 0.28, restitution: 0.32,
-      spheres: cfg.spheres||[],     // [i,j] pairs colliding as spheres (radius per body)
+      spheres: cfg.spheres||[],
+      torsion: cfg.torsion||null, twist:0,     // [i,j] pairs colliding as spheres (radius per body)
     };
     const B = i => i<0 ? W.hand : W.bodies[i];
 
@@ -192,7 +193,8 @@ const KeyPhysics = (() => {
           const a=B(j.a), b=B(j.b);
           const ra=qrot(a.q,j.ra), rb=qrot(b.q,j.rb);
           const d=sub(add(b.x,rb),add(a.x,ra)), c=len(d);
-          if (c>1e-9){ const nn=scl(d,1/c), wa=genW(a,ra,nn), wb=genW(b,rb,nn), l=c/(wa+wb);
+          const err = j.rope ? c-j.rope : c;          // a thread only pulls, it can go slack
+          if (c>1e-9 && err>0){ const nn=scl(d,1/c), wa=genW(a,ra,nn), wb=genW(b,rb,nn), l=err/(wa+wb);
             corr(a,scl(nn,l),ra); corr(b,scl(nn,-l),rb); }
           if (j.axA){
             const A=qrot(a.q,j.axA), Bv=qrot(b.q,j.axB), cr=crs(A,Bv), sn=len(cr);
@@ -260,10 +262,29 @@ const KeyPhysics = (() => {
         for (const j of W.joints){
           const a=B(j.a), b=B(j.b), rel=sub(b.w,a.w), rl=len(rel);
           if (rl<1e-9) continue;
-          const nn=scl(rel,1/rl), wa=angW(a,nn), wb=angW(b,nn), k=Math.min(1,W.jointFriction*h);
+          const nn=scl(rel,1/rl), wa=angW(a,nn), wb=angW(b,nn), k=Math.min(1,(j.friction??W.jointFriction)*h);
           const L=rl*k/(wa+wb);
           if (a.dyn) a.w=add(a.w,invIw(a,scl(nn,L)));
           if (b.dyn) b.w=sub(b.w,invIw(b,scl(nn,L)));
+        }
+        // thread torsion: a twisted cord winds back, so the keychain turns to and fro (accumulates whole turns)
+        if (W.torsion && env.restFacing){
+          const T=W.torsion, j=W.joints[0], b=W.bodies[T.body];
+          let t=sub(add(b.x,qrot(b.q,j.rb)),W.hand.x); const tl=len(t);
+          if (tl>1e-6){ t=scl(t,1/tl);
+            const f=qrot(b.q,T.axis), r0=env.restFacing;
+            const fp=sub(f,scl(t,dot(t,f))), rp=sub(r0,scl(t,dot(t,r0)));
+            if (len(fp)>0.3 && len(rp)>0.3){
+              const raw=Math.atan2(dot(t,crs(rp,fp)), dot(rp,fp));
+              if (W.twistRaw!==undefined){ let dlt=raw-W.twistRaw; dlt-=2*Math.PI*Math.round(dlt/(2*Math.PI)); W.twist+=dlt; }
+              W.twistRaw=raw;
+            } else W.twistRaw=undefined;
+            // the chain is stiff in twist, so the cord turns the whole keychain as one body
+            let It=0, Lt=0;
+            for (const q of W.bodies){ const ti=1/angW(q,t); It+=ti; Lt+=ti*dot(q.w,t); }
+            const wt=Lt/It, dw=-(T.k*W.twist + T.c*wt)/It*h;
+            for (const q of W.bodies) q.w=add(q.w,scl(t,dw));
+          }
         }
         for (const b of W.bodies){ b.v=scl(b.v,1-Math.min(1,W.airCoeff*b.invM*h)); b.w=scl(b.w,1-W.angDrag*h); }
       }
@@ -275,6 +296,7 @@ const KeyPhysics = (() => {
   function layout(){
     const RR=0.66, RW=0.03, PITCH=2*RW+0.004, TH0=Math.PI*0.22, ZS=0.8;
     const LA=0.17, LB=0.092, LR=0.026, RJ=0.12, rj=0.026;
+    const ROPE_r=0.022, ROPE_RL=RW+ROPE_r;
     const RO=1.1, T=0.1, BAIL_Y=1.18, BAIL_R=0.1, BAIL_r=0.034;
     const zAt = ang => { const t=((ang-TH0)%(2*Math.PI)+2*Math.PI)%(2*Math.PI); return (PITCH*t/(2*Math.PI)-PITCH+PITCH/2)*ZS; };
     const zMid=zAt(3*Math.PI/2), zTop=zAt(Math.PI/2);
@@ -301,7 +323,7 @@ const KeyPhysics = (() => {
       {name:'jump',    com:[0,yj,zMid],   mass:1,    inertia:inertia(torusYZ,1,rj*rj), pts:jumpPts, radius:RJ},
       {name:'pendant', com:[0,py,zMid],   mass:92,   inertia:inertia(disc,92,T*T/3), pts:pendPts, radius:RO},
     ];
-    const anchors=[[0,0,zTop],[0,ys+RW,zMid],[0,y1-LA+LR,zMid],[0,y2-LA+LR,zMid],[0,yj-RJ+rj,zMid]];
+    const anchors=[[0,ROPE_RL,zTop],[0,ys+RW,zMid],[0,y1-LA+LR,zMid],[0,y2-LA+LR,zMid],[0,yj-RJ+rj,zMid]];
     const X=[1,0,0], Z=[0,0,1], slop=0.2;
     const joints=[
       {a:-1,b:0, anchor:anchors[0], axA:null, axB:null},
@@ -310,18 +332,21 @@ const KeyPhysics = (() => {
       {a:2,b:3,  anchor:anchors[3], axA:X, axB:Z, slop},
       {a:3,b:4,  anchor:anchors[4], axA:Z, axB:X, slop},
     ];
-    return { bodies, joints, dims:{RR,RW,PITCH,TH0,ZS,LA,LB,LR,RJ,rj,RO,T,BAIL_Y,BAIL_R,BAIL_r,zMid,zTop,py} };
+    return { bodies, joints, dims:{ROPE_r,ROPE_RL,RR,RW,PITCH,TH0,ZS,LA,LB,LR,RJ,rj,RO,T,BAIL_Y,BAIL_R,BAIL_r,zMid,zTop,py} };
   }
 
   /* build a solver world for a layout, hanging from `hand` (sim frame) with rest orientation q0 */
   function fromLayout(L, hand, q0, opts={}){
-    const place=p=>add(hand,qrot(q0,p));
+    const rope=opts.rope||0, a0=L.joints[0].anchor, ofs=rope?[-a0[0],-rope-a0[1],-a0[2]]:[0,0,0];
+    const place=p=>add(hand,qrot(q0,add(p,ofs)));
     const bodies=L.bodies.map(b=>({mass:b.mass,inertia:b.inertia,x:place(b.com),q:q0,pts:b.pts.map(p=>p),radius:b.radius}));
     const joints=L.joints.map(j=>{
       const comA = j.a<0 ? null : L.bodies[j.a].com, comB=L.bodies[j.b].com;
+      if (j.a<0 && rope) return { a:-1, b:j.b, ra:[0,0,0], rb:sub(j.anchor,comB), rope, friction:0.25 };
       return { a:j.a, b:j.b, ra: comA? sub(j.anchor,comA) : qrot(q0,j.anchor), rb: sub(j.anchor,comB), axA:j.axA, axB:j.axB, slop:j.slop };
     });
-    return world({hand, bodies, joints, spheres:[[0,4]], ...opts});
+    const {rope:_r, ...rest}=opts;
+    return world({hand, bodies, joints, spheres:[[0,4]], ...rest});
   }
   return { layout, fromLayout, qrot, qmul, qcon, qnrm };
 })();
@@ -446,7 +471,21 @@ const enamelWhite = new THREE.MeshPhysicalMaterial({ color:0xf1eee6, roughness:0
   clearcoat:1, clearcoatRoughness:0.04, clearcoatNormalMap:peelTex, clearcoatNormalScale:new THREE.Vector2(0.28,0.28),
   sheen:0.25, sheenRoughness:0.6, sheenColor:new THREE.Color(0xffffff), ior:1.52, envMapIntensity:1.0 });
 
-/* ---------- geometry (shared layout with the solver; 1 unit = 15 mm) ---------- */
+/* ---------- cord + screw materials ---------- */
+function cordTexture(){
+  const n=128, h=new Float32Array(n*n);
+  for (let y=0;y<n;y++) for (let x=0;x<n;x++){ const u=(x+y)/n; h[y*n+x]=Math.pow(Math.abs(Math.sin(Math.PI*u*3)),0.6); }
+  return normalTexture(h, n, 9, 1);
+}
+const cordTex = cordTexture(); cordTex.repeat.set(16,1);
+const cordMat = new THREE.MeshPhysicalMaterial({
+  color:0x8f1915, roughness:0.78, metalness:0, normalMap:cordTex, normalScale:new THREE.Vector2(0.9,0.9),
+  sheen:1, sheenColor:new THREE.Color(0xff7a5c), sheenRoughness:0.45, envMapIntensity:0.6,
+});
+const screwMat = new THREE.MeshPhysicalMaterial({ color:0xa9aeb6, metalness:1, roughness:1.9, roughnessMap:scratchTex, envMapIntensity:1.1 });
+const recessMat = new THREE.MeshStandardMaterial({ color:0x15161a, metalness:0.6, roughness:0.6 });
+
+/* ---------- geometry (shared layout with the solver; 1 unit = 22 mm) ---------- */
 const LAY = KeyPhysics.layout(), D = LAY.dims;
 const RI=0.985, RE=0.995;
 
@@ -496,7 +535,11 @@ function buildRing(){
   const helix=new Helix(), inner=new THREE.Group(); inner.scale.z=D.ZS;   // flat-section spring steel
   inner.add(new THREE.Mesh(new THREE.TubeGeometry(helix, 900, D.RW, 16, false), metal));
   for (const u of [0,1]){ const cap=new THREE.Mesh(new THREE.SphereGeometry(D.RW, 20, 12), metal); cap.position.copy(helix.getPoint(u)); inner.add(cap); }
-  g.add(inner); return g;   // origin = ring centre = body COM
+  g.add(inner);
+  // the cord loops over the top of the ring wire
+  const loop=new THREE.Mesh(new THREE.TorusGeometry(D.ROPE_RL, D.ROPE_r, 10, 40), cordMat);
+  loop.rotation.y=Math.PI/2; loop.position.set(0, D.RR, D.zTop); g.add(loop);
+  return g;   // origin = ring centre = body COM
 }
 function stadium(a, b, plane){
   const s=a-b, pts=[], P=(u,v)=> plane==='xy' ? new THREE.Vector3(u,v,0) : new THREE.Vector3(0,v,u);
@@ -517,16 +560,21 @@ const builders = {
 /* ---------- frames ----------
    device frame = three.js world (x right, y up the screen, z out of the glass)
    sim frame    = Earth axes (x east, y north, z up); Q maps device → Earth            */
-const G = 9.81/0.015;                                // gravity in units/s²
+const UNIT = 0.022;                                  // metres per scene unit (Ø 48 mm pendant)
+const G = 9.81/UNIT;                                 // gravity in units/s²
 const Q0 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI/2); // phone held upright
 const Qs = Q0.clone(), qTarget = Q0.clone(), screenQ = new THREE.Quaternion();
-const R_ATT = new THREE.Vector3(0, 2.25, 0);          // where the ring hangs, 34 mm above phone centre
+const SCREW_Y = 3.05, SCREW_R = 0.09, SCREW_LEN = 1.45;          // 4 × 40 mm wood screw, 32 mm proud of the wall
+const TIE_Z = -1.6 + 1.30;                                        // cord tied just behind the head
+const TIE = new THREE.Vector3(0, SCREW_Y - SCREW_R - D.ROPE_r, TIE_Z);
+const ROPE_LEN = 1.8;                                             // 40 mm of cord
 const BACK_Z = -1.6, FRONT_Z = 1.6;                   // phone back and cover glass of the "box"
 const arr = v=>[v.x,v.y,v.z];
 
 const sim = new THREE.Group(); scene.add(sim);
-const handF = R_ATT.clone().applyQuaternion(Q0);
-const W = KeyPhysics.fromLayout(LAY, arr(handF), [Q0.x,Q0.y,Q0.z,Q0.w]);
+const handF = TIE.clone().applyQuaternion(Q0);
+const W = KeyPhysics.fromLayout(LAY, arr(handF), [Q0.x,Q0.y,Q0.z,Q0.w],
+  { rope: ROPE_LEN, torsion: { body:0, axis:[0,0,1], k:69, c:15 } });
 const bodyObjs = LAY.bodies.map((b,i)=>{
   const o = new THREE.Group(); o.add(builders[b.name]());
   o.traverse(m=>{ if (m.isMesh){ m.castShadow=true; m.receiveShadow=true; m.userData.bi=i; } });
@@ -534,6 +582,56 @@ const bodyObjs = LAY.bodies.map((b,i)=>{
 });
 function syncBodies(){
   W.bodies.forEach((b,i)=>{ bodyObjs[i].position.fromArray(b.x); bodyObjs[i].quaternion.set(b.q[0],b.q[1],b.q[2],b.q[3]); });
+}
+
+/* ---------- screw in the wall ---------- */
+(function buildScrew(){
+  const g=new THREE.Group(); g.position.set(0, SCREW_Y, BACK_Z);
+  const core=new THREE.Mesh(new THREE.CylinderGeometry(SCREW_R*0.78, SCREW_R*0.78, SCREW_LEN-0.08, 28), screwMat);
+  core.rotation.x=Math.PI/2; core.position.z=(SCREW_LEN-0.08)/2; g.add(core);
+  class Thread extends THREE.Curve{ getPoint(u,t=new THREE.Vector3()){ const z=0.02+u*(SCREW_LEN-0.42), a=z/0.075*Math.PI*2;
+    return t.set(SCREW_R*0.8*Math.cos(a), SCREW_R*0.8*Math.sin(a), z); } }
+  g.add(new THREE.Mesh(new THREE.TubeGeometry(new Thread(), 420, SCREW_R*0.24, 6, false), screwMat));
+  const prof=[], add=(r,z)=>prof.push(new THREE.Vector2(r,z));
+  add(SCREW_R*0.78,0); add(0.185,0.004);
+  for (let i=0;i<=8;i++){ const a=i/8*Math.PI/2; add(0.15+0.04*Math.cos(a), 0.05+0.04*Math.sin(a)); }
+  add(0.0001,0.09);
+  const head=new THREE.Mesh(new THREE.LatheGeometry(prof, 48), screwMat);
+  head.rotation.x=Math.PI/2; head.position.z=SCREW_LEN-0.09; g.add(head);
+  for (const r of [0, Math.PI/2]){ const b=new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.042, 0.05), recessMat);
+    b.rotation.z=r+Math.PI/4; b.position.z=SCREW_LEN-0.024; g.add(b); }
+  // cord wound twice round the shank, with the knot underneath
+  for (const dz of [-0.03, 0.03]){ const w=new THREE.Mesh(new THREE.TorusGeometry(SCREW_R*0.78+D.ROPE_r, D.ROPE_r, 10, 40), cordMat);
+    w.position.z=TIE_Z-BACK_Z+dz; g.add(w); }
+  const knot=new THREE.Mesh(new THREE.SphereGeometry(D.ROPE_r*2.1, 16, 12), cordMat);
+  knot.position.set(0, -SCREW_R*0.78-D.ROPE_r*1.4, TIE_Z-BACK_Z); knot.scale.set(1.3,1,1); g.add(knot);
+  const hole=new THREE.Mesh(new THREE.CircleGeometry(0.16, 32), new THREE.MeshBasicMaterial({ color:0x000000, transparent:true, opacity:0.35, depthWrite:false }));
+  hole.position.z=0.002; g.add(hole);
+  g.traverse(m=>{ if (m.isMesh && m!==hole){ m.castShadow=true; m.receiveShadow=true; } });
+  scene.add(g);
+})();
+
+/* ---------- the cord itself: straight when taut, sagging when slack ---------- */
+let cordMesh=null;
+const cA=new THREE.Vector3(), cB=new THREE.Vector3(), cAB=new THREE.Vector3(), cSag=new THREE.Vector3(), cPts=[];
+for (let i=0;i<=16;i++) cPts.push(new THREE.Vector3());
+function updateCord(g){
+  const j=W.joints[0], r=W.bodies[0];
+  cA.fromArray(W.hand.x);
+  cB.fromArray(KeyPhysics.qrot(r.q,j.rb)).add(new THREE.Vector3().fromArray(r.x));
+  cAB.subVectors(cB,cA); const d=cAB.length(), slack=Math.max(0, ROPE_LEN-d);
+  let sag=0;
+  if (slack>1e-4 && d>1e-4){
+    sag=Math.min(Math.sqrt(3*d*slack/8), ROPE_LEN*0.5);
+    cSag.fromArray(g).normalize(); const ab=cAB.clone().normalize();
+    cSag.addScaledVector(ab, -cSag.dot(ab));
+    if (cSag.lengthSq()<1e-6) cSag.set(1,0,0).addScaledVector(ab,-ab.x);
+    cSag.normalize();
+  }
+  for (let i=0;i<=16;i++){ const u=i/16; cPts[i].copy(cA).addScaledVector(cAB,u).addScaledVector(cSag, sag*4*u*(1-u)); }
+  const geo=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(cPts), 32, D.ROPE_r, 7, false);
+  if (!cordMesh){ cordMesh=new THREE.Mesh(geo, cordMat); cordMesh.castShadow=true; sim.add(cordMesh); }
+  else { cordMesh.geometry.dispose(); cordMesh.geometry=geo; }
 }
 
 /* ---------- lights / backdrop ---------- */
@@ -549,14 +647,14 @@ const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(40,40), new THREE.Shadow
 backdrop.position.z = BACK_Z - 0.01; backdrop.receiveShadow = true; scene.add(backdrop);
 
 /* ---------- camera / controls ---------- */
-camera.position.set(0.9, 0.4, 10.4);
+camera.position.set(0.9, 0.35, 11.6);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, -0.05, 0);
+controls.target.set(0, 0.05, -0.6);
 controls.enableDamping=true; controls.dampingFactor=0.06; controls.enablePan=false;
 controls.minDistance=3; controls.maxDistance=18; controls.update();
 function resize(){
   const w=stage.clientWidth, h=stage.clientHeight; renderer.setSize(w,h,false);
-  camera.aspect=w/h; camera.fov = w/h < 0.75 ? 44 : 30; camera.updateProjectionMatrix();
+  camera.aspect=w/h; camera.fov = w/h < 0.75 ? 48 : 40; camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(stage); resize();
 
@@ -634,7 +732,7 @@ async function enableSensors(){
   window.addEventListener('devicemotion', onMotion);
   window.addEventListener('deviceorientation', onOrient);
   sensorOn = true; sensorsBtn.setAttribute('aria-pressed','true');
-  toast('Качайте и наклоняйте телефон. Брелок висит на верхнем крае экрана.', 3800);
+  toast('Качайте и наклоняйте телефон. Брелок висит на нитке на шурупе вверху экрана.', 3800);
   setTimeout(()=>{
     if (sensorOn && !gotOrient && !gotMotion){
       disableSensors();
@@ -693,10 +791,10 @@ renderer.setAnimationLoop(()=>{
 
   // inertial forces: gravity minus the phone's own acceleration (all in Earth axes)
   accDev.lerp(accRaw, 1-Math.exp(-dt*35));
-  aF.copy(accDev).applyQuaternion(Qs).multiplyScalar(1/0.015);
+  aF.copy(accDev).applyQuaternion(Qs).multiplyScalar(1/UNIT);
   const g = [-aF.x, -aF.y, -G-aF.z];
 
-  handF.copy(R_ATT).applyQuaternion(Qs);
+  handF.copy(TIE).applyQuaternion(Qs);
   nBack.copy(ez).applyQuaternion(Qs);
   const walls = [
     { n: arr(nBack), d: BACK_Z },                        // phone back
@@ -705,8 +803,9 @@ renderer.setAnimationLoop(()=>{
   let grabEnv = null;
   if (grab){ grab.target = arr(sim.worldToLocal(dragWorld.clone())); grabEnv = grab; }
 
-  W.step(dt, { g, hand: arr(handF), walls, grab: grabEnv });
+  W.step(dt, { g, hand: arr(handF), walls, grab: grabEnv, restFacing: arr(ez.clone().applyQuaternion(Qs)) });
   syncBodies();
+  updateCord(g);
 
   controls.update();
   renderer.render(scene, camera);
